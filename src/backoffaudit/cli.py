@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterator, TextIO
 
+from .config import load_policy_config
 from .policy import RetryPolicy
+
+DEFAULTS = {"multiplier": 2.0, "jitter": "none", "tolerance": 0.05}
+REQUIRED_KEYS = ("max_attempts", "base_delay", "max_delay")
 
 
 @dataclass
@@ -94,33 +98,58 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="file of attempt timestamps, one per line; defaults to stdin",
     )
-    parser.add_argument("--max-attempts", type=int, required=True)
-    parser.add_argument("--base-delay", type=float, required=True, help="seconds")
-    parser.add_argument("--multiplier", type=float, default=2.0)
-    parser.add_argument("--max-delay", type=float, required=True, help="seconds")
     parser.add_argument(
-        "--jitter", choices=["none", "full", "equal"], default="none"
+        "--config",
+        help="JSON or TOML file supplying policy settings; flags below override it",
+    )
+    parser.add_argument("--max-attempts", type=int, default=None)
+    parser.add_argument("--base-delay", type=float, default=None, help="seconds")
+    parser.add_argument("--multiplier", type=float, default=None)
+    parser.add_argument("--max-delay", type=float, default=None, help="seconds")
+    parser.add_argument(
+        "--jitter", choices=["none", "full", "equal"], default=None
     )
     parser.add_argument(
         "--tolerance",
         type=float,
-        default=0.05,
+        default=None,
         help="slack fraction for --jitter none, to absorb clock imprecision",
     )
     return parser
 
 
-def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+def resolve_policy_settings(args, parser: argparse.ArgumentParser) -> dict:
+    """Merges (in increasing precedence) built-in defaults, --config file
+    contents, and any flags the user actually passed on the command line."""
+    settings = dict(DEFAULTS)
 
-    policy = RetryPolicy(
-        max_attempts=args.max_attempts,
-        base_delay=args.base_delay,
-        multiplier=args.multiplier,
-        max_delay=args.max_delay,
-        jitter=args.jitter,
-        tolerance=args.tolerance,
-    )
+    if args.config:
+        try:
+            settings.update(load_policy_config(args.config))
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+
+    for key in ("max_attempts", "base_delay", "multiplier", "max_delay", "jitter", "tolerance"):
+        value = getattr(args, key)
+        if value is not None:
+            settings[key] = value
+
+    missing = [key for key in REQUIRED_KEYS if key not in settings]
+    if missing:
+        parser.error(
+            f"missing required policy setting(s): {', '.join(missing)} "
+            "(pass as flags or set them in --config)"
+        )
+
+    return settings
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    settings = resolve_policy_settings(args, parser)
+
+    policy = RetryPolicy(**settings)
 
     source = open(args.logfile) if args.logfile else sys.stdin
     attempts = 0

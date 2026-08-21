@@ -44,6 +44,29 @@ tail -f gateway.log | grep 'retrying request-id=abc123' | cut -d' ' -f1 \
   | backoff-audit --max-attempts 5 --base-delay 0.5 --multiplier 2 --max-delay 30
 ```
 
+## Config files
+
+Typing out the same five flags for every invocation gets old, so a policy
+can also live in a JSON or TOML file:
+
+```
+$ cat policy.json
+{
+  "max_attempts": 5,
+  "base_delay": 0.5,
+  "multiplier": 2,
+  "max_delay": 30,
+  "jitter": "none"
+}
+
+$ backoff-audit attempts.log --config policy.json
+```
+
+Any flag also given on the command line overrides the corresponding value
+in the config file, so `--config policy.json --jitter full` runs the same
+policy with a different jitter mode without editing the file. TOML configs
+need Python 3.11+ (`tomllib`); JSON works everywhere.
+
 ## Jitter modes
 
 The policy's `--jitter` flag controls the allowed window for each wait,
