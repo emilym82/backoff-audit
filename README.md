@@ -44,6 +44,21 @@ tail -f gateway.log | grep 'retrying request-id=abc123' | cut -d' ' -f1 \
   | backoff-audit --max-attempts 5 --base-delay 0.5 --multiplier 2 --max-delay 30
 ```
 
+Pass `--format json` to get newline-delimited JSON instead, one object per
+attempt plus a summary object at the end, for feeding into something else
+rather than reading with your eyes:
+
+```
+$ backoff-audit attempts.log \
+    --max-attempts 5 --base-delay 0.5 --multiplier 2 --max-delay 30 \
+    --jitter none --format json
+{"attempt": 1, "timestamp": 1755680400.0, "delay": null, "window": null, "violation": false, "reason": "first_attempt", "message": "ok (first attempt)"}
+{"attempt": 2, "timestamp": 1755680400.51, "delay": 0.51, "window": [0.475, 0.525], "violation": false, "reason": "ok", "message": "ok"}
+{"attempt": 3, "timestamp": 1755680401.52, "delay": 1.01, "window": [0.95, 1.05], "violation": false, "reason": "ok", "message": "ok"}
+{"attempt": 4, "timestamp": 1755680404.48, "delay": 2.96, "window": [1.9, 2.1], "violation": true, "reason": "too_slow", "message": "VIOLATION: too slow (expected [1.900, 2.100])"}
+{"attempts": 4, "violations": 1}
+```
+
 ## Config files
 
 Typing out the same five flags for every invocation gets old, so a policy

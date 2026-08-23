@@ -3,10 +3,11 @@ against a RetryPolicy as it arrives, so a multi-gigabyte log (or a live
 `tail -f`) never has to be held in memory at once."""
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterator, TextIO
+from typing import Iterator, Optional, TextIO
 
 from .config import load_policy_config
 from .policy import RetryPolicy
@@ -17,8 +18,32 @@ REQUIRED_KEYS = ("max_attempts", "base_delay", "max_delay")
 
 @dataclass
 class AttemptReport:
-    line: str
+    attempt: int
+    timestamp: float
+    delay: Optional[float]
+    window: Optional[tuple]
     is_violation: bool
+    reason: str
+    message: str
+
+    def render_text(self) -> str:
+        prefix = f"attempt {self.attempt} at {self.timestamp:.3f}"
+        if self.delay is None:
+            return f"{prefix}  {self.message}"
+        return f"{prefix}  delay={self.delay:.3f}s  {self.message}"
+
+    def render_json(self) -> str:
+        return json.dumps(
+            {
+                "attempt": self.attempt,
+                "timestamp": self.timestamp,
+                "delay": self.delay,
+                "window": list(self.window) if self.window is not None else None,
+                "violation": self.is_violation,
+                "reason": self.reason,
+                "message": self.message,
+            }
+        )
 
 
 def parse_timestamp(raw: str) -> float:
@@ -52,17 +77,26 @@ def audit(policy: RetryPolicy, timestamps: Iterator[float]) -> Iterator[AttemptR
 
         if attempt > policy.max_attempts:
             yield AttemptReport(
-                f"attempt {attempt} at {ts:.3f}  "
-                f"VIOLATION: exceeds max_attempts={policy.max_attempts}",
+                attempt=attempt,
+                timestamp=ts,
+                delay=None,
+                window=None,
                 is_violation=True,
+                reason="max_attempts_exceeded",
+                message=f"VIOLATION: exceeds max_attempts={policy.max_attempts}",
             )
             prev_ts = ts
             continue
 
         if prev_ts is None:
             yield AttemptReport(
-                f"attempt {attempt} at {ts:.3f}  ok (first attempt)",
+                attempt=attempt,
+                timestamp=ts,
+                delay=None,
+                window=None,
                 is_violation=False,
+                reason="first_attempt",
+                message="ok (first attempt)",
             )
             prev_ts = ts
             continue
@@ -71,16 +105,24 @@ def audit(policy: RetryPolicy, timestamps: Iterator[float]) -> Iterator[AttemptR
         lo, hi = policy.allowed_window(attempt - 1)
         if delay < lo:
             is_violation = True
-            verdict = f"VIOLATION: too fast (expected [{lo:.3f}, {hi:.3f}])"
+            reason = "too_fast"
+            message = f"VIOLATION: too fast (expected [{lo:.3f}, {hi:.3f}])"
         elif delay > hi:
             is_violation = True
-            verdict = f"VIOLATION: too slow (expected [{lo:.3f}, {hi:.3f}])"
+            reason = "too_slow"
+            message = f"VIOLATION: too slow (expected [{lo:.3f}, {hi:.3f}])"
         else:
             is_violation = False
-            verdict = "ok"
+            reason = "ok"
+            message = "ok"
         yield AttemptReport(
-            f"attempt {attempt} at {ts:.3f}  delay={delay:.3f}s  {verdict}",
+            attempt=attempt,
+            timestamp=ts,
+            delay=delay,
+            window=(lo, hi),
             is_violation=is_violation,
+            reason=reason,
+            message=message,
         )
         prev_ts = ts
 
@@ -114,6 +156,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="slack fraction for --jitter none, to absorb clock imprecision",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="'json' emits one JSON object per line (newline-delimited) plus a "
+        "JSON summary object, for machine consumption",
     )
     return parser
 
@@ -156,14 +205,17 @@ def main(argv=None) -> int:
     violations = 0
     try:
         for report in audit(policy, read_timestamps(source)):
-            print(report.line)
+            print(report.render_json() if args.format == "json" else report.render_text())
             attempts += 1
             violations += report.is_violation
     finally:
         if source is not sys.stdin:
             source.close()
 
-    print(f"--- {attempts} attempts, {violations} violation(s)")
+    if args.format == "json":
+        print(json.dumps({"attempts": attempts, "violations": violations}))
+    else:
+        print(f"--- {attempts} attempts, {violations} violation(s)")
     return 1 if violations else 0
 
 
