@@ -94,6 +94,16 @@ matching the common backoff implementations:
 - `equal` — delay must be between half and all of the nominal value
   (`nominal/2 + random.uniform(0, nominal/2)`, "equal jitter").
 
+## Out-of-order and duplicate lines
+
+Logs get reordered: two writers on the same host, a shipper that retries a
+batch, clock skew between processes. If a line's timestamp doesn't advance
+past the one before it, `backoff-audit` doesn't treat it as a genuine retry
+attempt — it flags the line (`duplicate_timestamp` if the timestamp repeats
+exactly, `out_of_order` if it's earlier) and moves on without touching the
+attempt count or the exponential wait index, so one bad line doesn't throw
+off the delay window computed for every attempt that follows it.
+
 ## Why streaming matters here
 
 Attempt logs are exactly the kind of file that grows without bound: a

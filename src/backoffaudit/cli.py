@@ -68,11 +68,36 @@ def read_timestamps(fp: TextIO) -> Iterator[float]:
 
 def audit(policy: RetryPolicy, timestamps: Iterator[float]) -> Iterator[AttemptReport]:
     """Yields one report per attempt. Keeps only the previous timestamp and
-    the attempt count in memory, regardless of how long the stream runs."""
+    the attempt count in memory, regardless of how long the stream runs.
+
+    A line whose timestamp doesn't advance past the previous one (a repeated
+    line, or clock skew putting it earlier) isn't a genuine retry attempt, so
+    it's flagged and skipped rather than being counted against max_attempts
+    or thrown into the exponential wait-index math — one bad line shouldn't
+    corrupt the delay computed for every real attempt that follows it.
+    """
     prev_ts = None
     attempt = 0
 
     for ts in timestamps:
+        if prev_ts is not None and ts <= prev_ts:
+            if ts == prev_ts:
+                reason = "duplicate_timestamp"
+                message = "VIOLATION: duplicate timestamp (same as the previous attempt)"
+            else:
+                reason = "out_of_order"
+                message = "VIOLATION: out-of-order timestamp (earlier than the previous attempt)"
+            yield AttemptReport(
+                attempt=attempt + 1,
+                timestamp=ts,
+                delay=ts - prev_ts,
+                window=None,
+                is_violation=True,
+                reason=reason,
+                message=message,
+            )
+            continue
+
         attempt += 1
 
         if attempt > policy.max_attempts:
