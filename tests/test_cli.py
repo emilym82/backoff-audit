@@ -2,7 +2,13 @@ import datetime
 import io
 import unittest
 
-from backoffaudit.cli import audit, parse_timestamp, read_timestamps
+from backoffaudit.cli import (
+    audit,
+    audit_grouped,
+    parse_timestamp,
+    read_grouped_records,
+    read_timestamps,
+)
 from backoffaudit.policy import RetryPolicy
 
 
@@ -36,6 +42,20 @@ class ReadTimestampsTests(unittest.TestCase):
     def test_skips_blank_and_comment_lines(self):
         fp = io.StringIO("1000\n\n# comment\n1001\n")
         self.assertEqual(list(read_timestamps(fp)), [1000.0, 1001.0])
+
+
+class ReadGroupedRecordsTests(unittest.TestCase):
+    def test_splits_request_id_from_timestamp(self):
+        fp = io.StringIO("req-a 1000\nreq-b 1000.5\n\n# comment\nreq-a 1001\n")
+        self.assertEqual(
+            list(read_grouped_records(fp)),
+            [("req-a", 1000.0), ("req-b", 1000.5), ("req-a", 1001.0)],
+        )
+
+    def test_missing_request_id_raises(self):
+        fp = io.StringIO("1000\n")
+        with self.assertRaises(ValueError):
+            list(read_grouped_records(fp))
 
 
 class AuditTests(unittest.TestCase):
@@ -97,6 +117,47 @@ class AuditTests(unittest.TestCase):
         # attempt": the next genuine attempt's delay is still measured
         # from 1005, the last timestamp that actually advanced.
         self.assertEqual(reports[3].delay, 1009.0 - 1005.0)
+
+
+class AuditGroupedTests(unittest.TestCase):
+    def test_interleaved_requests_tracked_independently(self):
+        policy = make_policy(tolerance=0.1)
+        records = [
+            ("req-a", 1000.0),
+            ("req-b", 1000.0),
+            ("req-a", 1001.0),
+            ("req-b", 1002.0),
+        ]
+        reports = list(audit_grouped(policy, iter(records)))
+
+        by_a = [r for r in reports if r.request_id == "req-a"]
+        by_b = [r for r in reports if r.request_id == "req-b"]
+        self.assertEqual([r.attempt for r in by_a], [1, 2])
+        self.assertEqual([r.attempt for r in by_b], [1, 2])
+        # req-b's first attempt lands on the same timestamp as req-a's
+        # first attempt, so it doesn't get flagged as a duplicate against
+        # req-a's state — the two requests are tracked separately.
+        self.assertEqual(by_b[0].reason, "first_attempt")
+        self.assertFalse(by_b[0].is_violation)
+        self.assertEqual(by_a[1].delay, 1.0)
+        self.assertEqual(by_b[1].delay, 2.0)
+
+    def test_matches_ungrouped_audit_for_a_single_request_id(self):
+        policy = make_policy(tolerance=0.5)
+        timestamps = [1000.0, 1001.0, 1003.0]
+        grouped = list(audit_grouped(policy, iter((("req-a", ts) for ts in timestamps))))
+        ungrouped = list(audit(policy, iter(timestamps)))
+
+        self.assertEqual([r.attempt for r in grouped], [r.attempt for r in ungrouped])
+        self.assertEqual([r.delay for r in grouped], [r.delay for r in ungrouped])
+        self.assertEqual([r.reason for r in grouped], [r.reason for r in ungrouped])
+        self.assertTrue(all(r.request_id == "req-a" for r in grouped))
+
+    def test_reports_carry_request_id_in_text_and_json(self):
+        policy = make_policy()
+        report = next(iter(audit_grouped(policy, iter([("req-a", 1000.0)]))))
+        self.assertTrue(report.render_text().startswith("[req-a] attempt 1"))
+        self.assertIn('"request_id": "req-a"', report.render_json())
 
 
 if __name__ == "__main__":

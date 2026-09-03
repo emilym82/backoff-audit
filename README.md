@@ -104,6 +104,39 @@ exactly, `out_of_order` if it's earlier) and moves on without touching the
 attempt count or the exponential wait index, so one bad line doesn't throw
 off the delay window computed for every attempt that follows it.
 
+## Multiple requests in one log
+
+The examples above assume every line belongs to the same request. If your
+log interleaves attempts from several requests — a gateway serving many
+callers at once — pass `--group-by-request` and prefix each line with a
+request id:
+
+```
+$ cat multi.log
+req-1 1755680400.000
+req-2 1755680400.200
+req-1 1755680400.510
+req-2 1755680401.220
+req-1 1755680401.520
+
+$ backoff-audit multi.log --group-by-request \
+    --max-attempts 5 --base-delay 0.5 --multiplier 2 --max-delay 30 --jitter none
+[req-1] attempt 1 at 1755680400.000  ok (first attempt)
+[req-2] attempt 1 at 1755680400.200  ok (first attempt)
+[req-1] attempt 2 at 1755680400.510  delay=0.510s  ok
+[req-2] attempt 2 at 1755680401.220  delay=1.020s  ok
+[req-1] attempt 3 at 1755680401.520  delay=1.010s  ok
+--- 5 attempts, 0 violation(s)
+```
+
+Each request id gets its own attempt count and delay window, computed
+independently, in a single pass over the file — a line for `req-2` never
+affects the window checked for `req-1`'s next attempt, no matter how the
+lines are interleaved. Memory use scales with the number of distinct
+request ids in flight, not with the number of lines, so this is still cheap
+for a log covering thousands of requests as long as they're not all open at
+once.
+
 ## Why streaming matters here
 
 Attempt logs are exactly the kind of file that grows without bound: a
