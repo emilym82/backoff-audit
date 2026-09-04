@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import io
 import unittest
@@ -5,9 +6,13 @@ import unittest
 from backoffaudit.cli import (
     audit,
     audit_grouped,
+    build_parser,
+    follow_lines,
+    main,
     parse_timestamp,
     read_grouped_records,
     read_timestamps,
+    resolve_policy_settings,
 )
 from backoffaudit.policy import RetryPolicy
 
@@ -56,6 +61,55 @@ class ReadGroupedRecordsTests(unittest.TestCase):
         fp = io.StringIO("1000\n")
         with self.assertRaises(ValueError):
             list(read_grouped_records(fp))
+
+
+class _FakeFile:
+    """Stands in for a real file handle in follow_lines() tests: each call
+    to readline() returns the next scripted chunk, with "" standing for
+    "nothing new yet" (what a real file returns at EOF)."""
+
+    def __init__(self, chunks):
+        self._chunks = iter(chunks)
+
+    def readline(self):
+        return next(self._chunks, "")
+
+
+class FollowLinesTests(unittest.TestCase):
+    def test_yields_complete_lines_and_polls_past_eof(self):
+        # "" simulates hitting EOF before more data has been written.
+        fp = _FakeFile(["1000\n", "", "1001\n"])
+        gen = follow_lines(fp, poll_interval=0)
+        self.assertEqual([next(gen), next(gen)], ["1000\n", "1001\n"])
+
+    def test_buffers_a_partial_line_until_the_newline_arrives(self):
+        # a writer that flushes mid-line shouldn't produce a truncated
+        # line that fails to parse.
+        fp = _FakeFile(["10", "", "01\n", "1002\n"])
+        gen = follow_lines(fp, poll_interval=0)
+        self.assertEqual([next(gen), next(gen)], ["1001\n", "1002\n"])
+
+
+class FollowFlagTests(unittest.TestCase):
+    def test_follow_without_logfile_is_rejected(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ["--follow", "--max-attempts", "3", "--base-delay", "1", "--max-delay", "30"]
+        )
+        settings = resolve_policy_settings(args, parser)
+        RetryPolicy(**settings)  # settings themselves are valid
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            main(
+                [
+                    "--follow",
+                    "--max-attempts",
+                    "3",
+                    "--base-delay",
+                    "1",
+                    "--max-delay",
+                    "30",
+                ]
+            )
 
 
 class AuditTests(unittest.TestCase):

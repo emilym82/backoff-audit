@@ -44,6 +44,22 @@ tail -f gateway.log | grep 'retrying request-id=abc123' | cut -d' ' -f1 \
   | backoff-audit --max-attempts 5 --base-delay 0.5 --multiplier 2 --max-delay 30
 ```
 
+Or point `backoff-audit` at the file directly with `--follow` and it does
+the tailing itself, watching for lines appended after EOF instead of
+exiting once it's caught up:
+
+```
+backoff-audit gateway.log --follow \
+  --max-attempts 5 --base-delay 0.5 --multiplier 2 --max-delay 30 --jitter none
+```
+
+`--follow` requires a logfile argument — stdin already blocks for more
+input when it's the read end of a live pipe, so there's nothing extra to
+do there. Output is flushed after every line rather than block-buffered,
+so violations show up as soon as they're read rather than waiting for a
+buffer to fill. Stop it with Ctrl-C; it prints the summary line for
+whatever it audited before exiting.
+
 Pass `--format json` to get newline-delimited JSON instead, one object per
 attempt plus a summary object at the end, for feeding into something else
 rather than reading with your eyes:

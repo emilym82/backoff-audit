@@ -7,6 +7,7 @@ independently in the same pass."""
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterator, Optional, TextIO
@@ -64,19 +65,41 @@ def parse_timestamp(raw: str) -> float:
         raise ValueError(f"unrecognized timestamp: {raw!r}")
 
 
-def read_timestamps(fp: TextIO) -> Iterator[float]:
-    for line in fp:
+def follow_lines(fp: TextIO, poll_interval: float = 0.5) -> Iterator[str]:
+    """Like iterating over fp, but instead of stopping at EOF, polls for
+    more data forever -- the same trick `tail -f` uses, so a live log
+    file can be audited directly without shelling out to tail.
+
+    A line is only yielded once it's newline-terminated. Without that, a
+    writer that flushes a timestamp before the trailing '\\n' would hand
+    us a partial line that fails to parse and kills the whole run instead
+    of just waiting for the rest of it.
+    """
+    partial = ""
+    while True:
+        chunk = fp.readline()
+        if not chunk:
+            time.sleep(poll_interval)
+            continue
+        partial += chunk
+        if partial.endswith("\n"):
+            yield partial
+            partial = ""
+
+
+def read_timestamps(lines: Iterator[str]) -> Iterator[float]:
+    for line in lines:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         yield parse_timestamp(line)
 
 
-def read_grouped_records(fp: TextIO) -> Iterator[tuple[str, float]]:
+def read_grouped_records(lines: Iterator[str]) -> Iterator[tuple[str, float]]:
     """Like read_timestamps, but each line is '<request_id> <timestamp>' —
     the format --group-by-request expects so a log covering several
     concurrent requests can still be audited in one pass over the file."""
-    for line in fp:
+    for line in lines:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -257,6 +280,13 @@ def build_parser() -> argparse.ArgumentParser:
         "windows are tracked independently per request id, in one pass over "
         "a log that interleaves several requests",
     )
+    parser.add_argument(
+        "--follow",
+        action="store_true",
+        help="keep watching the logfile past EOF and audit new lines as they're "
+        "appended, like `tail -f`; requires a logfile argument, since stdin "
+        "already blocks for more input when piped from a live source",
+    )
     return parser
 
 
@@ -291,20 +321,31 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     settings = resolve_policy_settings(args, parser)
 
+    if args.follow and not args.logfile:
+        parser.error("--follow requires a logfile argument (not stdin)")
+
     policy = RetryPolicy(**settings)
 
     source = open(args.logfile) if args.logfile else sys.stdin
+    lines = follow_lines(source) if args.follow else iter(source)
     attempts = 0
     violations = 0
     try:
         if args.group_by_request:
-            reports = audit_grouped(policy, read_grouped_records(source))
+            reports = audit_grouped(policy, read_grouped_records(lines))
         else:
-            reports = audit(policy, read_timestamps(source))
+            reports = audit(policy, read_timestamps(lines))
         for report in reports:
-            print(report.render_json() if args.format == "json" else report.render_text())
+            text = report.render_json() if args.format == "json" else report.render_text()
+            # --follow is meant to be watched live, so flush every line
+            # rather than waiting for stdout's block buffer to fill.
+            print(text, flush=args.follow)
             attempts += 1
             violations += report.is_violation
+    except KeyboardInterrupt:
+        # --follow runs until interrupted; treat Ctrl-C as the normal way
+        # to stop watching, not a crash, and still print the summary.
+        pass
     finally:
         if source is not sys.stdin:
             source.close()
